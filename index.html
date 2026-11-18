@@ -10,75 +10,165 @@
   header { background:#1f3a5f; padding:14px 16px; font-weight:600; font-size:18px; }
   main { max-width:520px; margin:0 auto; padding:14px; text-align:center; }
   #reader { width:100%; border-radius:12px; overflow:hidden; background:#000; min-height:240px; }
-  #msg { margin:14px 0; font-size:16px; }
-  #msg.err { color:#ff8a80; }
+  #msg { margin:14px 0; font-size:16px; line-height:1.4; }
+  #msg.err { color:#ff8a80; } #msg.warn { color:#ffd180; }
   button, a.btn { display:block; width:100%; padding:14px; margin-top:10px; font-size:16px; font-weight:600;
                   border-radius:10px; border:0; background:#fff; color:#1f3a5f; text-decoration:none; box-sizing:border-box; cursor:pointer; }
   a.ghost { background:transparent; color:#fff; border:1px solid #666; }
+  .row { display:flex; gap:8px; margin-top:14px; }
+  .row input { flex:1; min-width:0; padding:12px; font-size:16px; border-radius:10px; border:0; }
+  .row button { width:auto; margin:0; padding:0 18px; }
 </style>
 </head>
 <body>
 <header>📦 Scan barcode</header>
 <main>
   <div id="reader"></div>
-  <p id="msg">Hala kamera ke barcode. Sistem akan detect sendiri.</p>
+  <p id="msg">Tekan butang di bawah untuk buka kamera.</p>
+  <button id="startbtn">▶ Buka kamera</button>
   <button id="retry" hidden>Cuba buka kamera lagi</button>
+  <button id="photobtn">📸 Ambil gambar barcode</button>
+  <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+  <div class="row">
+    <input id="manual" placeholder="Atau taip barcode" autocomplete="off">
+    <button id="manualgo">Pergi</button>
+  </div>
   <a id="back" class="btn ghost" href="#">← Kembali tanpa scan</a>
 </main>
 
 <script>
-  // ====== TETAPAN: tampal URL web app Apps Script (yang berakhir dengan /exec) ======
+  // ====== URL web app Apps Script (berakhir dengan /exec) ======
   const APP_URL = 'https://script.google.com/macros/s/AKfycbx_C_UDKhDbb8lKuyHsigi2zZ0ktFE6QD8ppdrV6OdA5GLZ4WLgYasiDj9aXxoddJJB/exec';
-  // =================================================================================
+  // =============================================================
 
   const $ = id => document.getElementById(id);
   const act = new URLSearchParams(location.search).get('act') || 'check'; // check | IN | OUT
-  let scanner = null, done = false;
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const inApp = /FBAN|FBAV|Instagram|WhatsApp|MicroMessenger|GSA\/|Snapchat|TikTok|Line\//i.test(ua);
+  let scanner = null, done = false, starting = false;
 
   $('back').href = APP_URL;
 
+  function say(text, cls) { $('msg').className = cls || ''; $('msg').textContent = text; }
+
+  function hint(e) {
+    const n = (e && e.name) || '';
+    if (n === 'NotAllowedError' || n === 'PermissionDeniedError') {
+      return isIOS
+        ? 'Kebenaran kamera ditolak. Di iPhone: Settings > Safari > Camera, pilih Ask atau Allow, kemudian refresh halaman ini.'
+        : 'Kebenaran kamera ditolak. Benarkan kamera untuk laman ini dalam tetapan browser.';
+    }
+    if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'Kamera belakang tak dijumpai.';
+    if (n === 'NotReadableError') return 'Kamera sedang digunakan oleh app lain. Tutup app tu dan cuba lagi.';
+    if (n === 'NoMediaDevices') return e.message;
+    return 'Kamera tak dapat dibuka.';
+  }
+
+  function fail(e) {
+    const detail = e && (e.name || e.message) ? ' [' + (e.name || '') + (e.message && e.name !== 'NoMediaDevices' ? ': ' + e.message : '') + ']' : '';
+    say(hint(e) + detail, 'err');
+    $('startbtn').hidden = true;
+    $('retry').hidden = false;
+  }
+
   function go(code) {
     if (done) return;
+    code = String(code || '').trim();
+    if (!code) return;
     done = true;
     if (navigator.vibrate) navigator.vibrate(120);
-    $('msg').textContent = 'Dijumpai: ' + code + ' …';
+    say('Dijumpai: ' + code + ' …');
     const sep = APP_URL.indexOf('?') === -1 ? '?' : '&';
     const dest = APP_URL + sep + 'code=' + encodeURIComponent(code) + '&act=' + encodeURIComponent(act);
     const finish = () => { location.href = dest; };
-    scanner.stop().then(finish).catch(finish);
+    (scanner ? scanner.stop() : Promise.resolve()).then(finish).catch(finish);
+  }
+
+  function makeScanner() {
+    const F = Html5QrcodeSupportedFormats;
+    return new Html5Qrcode('reader', {
+      formatsToSupport: [F.QR_CODE, F.CODE_128, F.CODE_39, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF],
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      verbose: false
+    });
+  }
+
+  // iPhone: elak kamera ultra-wide (tak boleh fokus dekat), pilih kamera belakang utama
+  async function pickIOSCamera() {
+    try {
+      const cams = await Html5Qrcode.getCameras();
+      if (!cams || !cams.length) return null;
+      const back = cams.filter(c => /back|rear|belakang/i.test(c.label));
+      const pool = back.length ? back : cams;
+      const main = pool.find(c => /^back camera$/i.test(c.label)) || pool.find(c => !/ultra|tele/i.test(c.label)) || pool[0];
+      return main ? main.id : null;
+    } catch (e) { return null; }
   }
 
   async function start() {
-    if (APP_URL.indexOf('PASTE') === 0) {
-      $('msg').className = 'err';
-      $('msg').textContent = 'APP_URL belum diset dalam fail scanner ini.';
-      return;
-    }
-    $('retry').hidden = true;
-    $('msg').className = '';
-    $('msg').textContent = 'Hala kamera ke barcode. Sistem akan detect sendiri.';
+    if (starting || done) return;
+    starting = true;
+    $('startbtn').hidden = true; $('retry').hidden = true;
+    say('Membuka kamera…');
     try {
-      const F = Html5QrcodeSupportedFormats;
-      scanner = new Html5Qrcode('reader', {
-        formatsToSupport: [F.QR_CODE, F.CODE_128, F.CODE_39, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF],
-        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-        verbose: false
-      });
-      await scanner.start(
-        { facingMode: 'environment' },
-        { fps: 12, qrbox: (w, h) => ({ width: Math.floor(w * 0.85), height: Math.floor(Math.min(h * 0.5, 180)) }) },
-        go,
-        () => {}
-      );
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw { name: 'NoMediaDevices', message: 'Browser ini tak benarkan akses kamera. Buka link ini terus dalam Safari atau Chrome, bukan dalam app lain (WhatsApp, Instagram, dsb).' };
+      }
+      scanner = makeScanner();
+      const cfg = {
+        fps: 10,
+        disableFlip: true,
+        qrbox: (w, h) => ({ width: Math.floor(w * 0.9), height: Math.floor(Math.min(h * 0.6, w * 0.5)) })
+      };
+      let started = false;
+      if (isIOS) {
+        const id = await pickIOSCamera();
+        if (id) {
+          try { await scanner.start(id, cfg, go, () => {}); started = true; } catch (e1) { started = false; }
+        }
+      }
+      if (!started) await scanner.start({ facingMode: 'environment' }, cfg, go, () => {});
+      say('Hala kamera ke barcode. Pegang stabil 15 hingga 25 cm, cahaya cukup, barcode lurus mendatar.');
     } catch (e) {
-      $('msg').className = 'err';
-      $('msg').textContent = 'Kamera tak dapat dibuka. Pastikan kau bagi kebenaran kamera untuk laman ini, kemudian cuba lagi.';
-      $('retry').hidden = false;
+      scanner = null;
+      fail(e);
     }
+    starting = false;
   }
 
+  $('startbtn').onclick = start;
   $('retry').onclick = start;
-  start();
+
+  // Ambil gambar (alternatif kalau kamera live bermasalah)
+  $('photobtn').onclick = () => $('photo').click();
+  $('photo').onchange = async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    say('Membaca barcode daripada gambar…');
+    try {
+      if (scanner) { try { await scanner.stop(); } catch (x) {} scanner = null; }
+      const text = await makeScanner().scanFile(f, false);
+      go(text);
+    } catch (err) {
+      say('Barcode tak dapat dibaca. Dekatkan, pastikan terang dan lurus, kemudian cuba lagi.', 'err');
+    }
+    e.target.value = '';
+  };
+
+  // Taip manual
+  const manualGo = () => go($('manual').value);
+  $('manualgo').onclick = manualGo;
+  $('manual').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); manualGo(); } });
+
+  // Mula
+  if (inApp) {
+    say('Nampak macam link ini dibuka dalam app lain (WhatsApp, Instagram dsb). Kamera selalunya tak jalan di sini. Salin link dan buka dalam Safari atau Chrome.', 'warn');
+  } else if (!isIOS) {
+    start();
+  } else {
+    say('Tekan "Buka kamera" untuk mula.');
+  }
 </script>
 </body>
 </html>
