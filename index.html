@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scan Barcode</title>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:#111; color:#fff; }
+  header { background:#1f3a5f; padding:14px 16px; font-weight:600; font-size:18px; }
+  main { max-width:520px; margin:0 auto; padding:14px; text-align:center; }
+  #reader { width:100%; border-radius:12px; overflow:hidden; background:#000; min-height:240px; }
+  #msg { margin:14px 0; font-size:16px; }
+  #msg.err { color:#ff8a80; }
+  button, a.btn { display:block; width:100%; padding:14px; margin-top:10px; font-size:16px; font-weight:600;
+                  border-radius:10px; border:0; background:#fff; color:#1f3a5f; text-decoration:none; box-sizing:border-box; cursor:pointer; }
+  a.ghost { background:transparent; color:#fff; border:1px solid #666; }
+</style>
+</head>
+<body>
+<header>📦 Scan barcode</header>
+<main>
+  <div id="reader"></div>
+  <p id="msg">Hala kamera ke barcode. Sistem akan detect sendiri.</p>
+  <button id="retry" hidden>Cuba buka kamera lagi</button>
+  <a id="back" class="btn ghost" href="#">← Kembali tanpa scan</a>
+</main>
+
+<script>
+  // ====== TETAPAN: tampal URL web app Apps Script (yang berakhir dengan /exec) ======
+  const APP_URL = 'https://script.google.com/macros/s/AKfycbx_C_UDKhDbb8lKuyHsigi2zZ0ktFE6QD8ppdrV6OdA5GLZ4WLgYasiDj9aXxoddJJB/exec';
+  // =================================================================================
+
+  const $ = id => document.getElementById(id);
+  const act = new URLSearchParams(location.search).get('act') || 'check'; // check | IN | OUT
+  let scanner = null, done = false;
+
+  $('back').href = APP_URL;
+
+  function go(code) {
+    if (done) return;
+    done = true;
+    if (navigator.vibrate) navigator.vibrate(120);
+    $('msg').textContent = 'Dijumpai: ' + code + ' …';
+    const sep = APP_URL.indexOf('?') === -1 ? '?' : '&';
+    const dest = APP_URL + sep + 'code=' + encodeURIComponent(code) + '&act=' + encodeURIComponent(act);
+    const finish = () => { location.href = dest; };
+    scanner.stop().then(finish).catch(finish);
+  }
+
+  async function start() {
+    if (APP_URL.indexOf('PASTE') === 0) {
+      $('msg').className = 'err';
+      $('msg').textContent = 'APP_URL belum diset dalam fail scanner ini.';
+      return;
+    }
+    $('retry').hidden = true;
+    $('msg').className = '';
+    $('msg').textContent = 'Hala kamera ke barcode. Sistem akan detect sendiri.';
+    try {
+      const F = Html5QrcodeSupportedFormats;
+      scanner = new Html5Qrcode('reader', {
+        formatsToSupport: [F.QR_CODE, F.CODE_128, F.CODE_39, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF],
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+        verbose: false
+      });
+      await scanner.start(
+        { facingMode: 'environment' },
+        { fps: 12, qrbox: (w, h) => ({ width: Math.floor(w * 0.85), height: Math.floor(Math.min(h * 0.5, 180)) }) },
+        go,
+        () => {}
+      );
+    } catch (e) {
+      $('msg').className = 'err';
+      $('msg').textContent = 'Kamera tak dapat dibuka. Pastikan kau bagi kebenaran kamera untuk laman ini, kemudian cuba lagi.';
+      $('retry').hidden = false;
+    }
+  }
+
+  $('retry').onclick = start;
+  start();
+</script>
+</body>
+</html>
