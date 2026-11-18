@@ -4,14 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Scan Barcode</title>
-<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<!-- BarcodeDetector: guna yang asli (Android) atau polyfill ZXing WASM (iPhone) -->
+<script src="https://cdn.jsdelivr.net/npm/barcode-detector@3.2.4/dist/iife/polyfill.js"></script>
 <style>
   body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:#111; color:#fff; }
   header { background:#1f3a5f; padding:14px 16px; font-weight:600; font-size:18px; }
   main { max-width:520px; margin:0 auto; padding:14px; text-align:center; }
-  #reader { width:100%; border-radius:12px; overflow:hidden; background:#000; min-height:240px; }
-  #msg { margin:14px 0; font-size:16px; line-height:1.4; }
+  #wrap { position:relative; width:100%; border-radius:12px; overflow:hidden; background:#000; min-height:220px; }
+  #cam { width:100%; display:block; background:#000; }
+  #guide { position:absolute; left:6%; right:6%; top:30%; bottom:30%; border:2px solid rgba(255,255,255,.85); border-radius:10px; pointer-events:none; box-shadow:0 0 0 9999px rgba(0,0,0,.25); }
+  #wrap.off #guide { display:none; }
+  #msg { margin:14px 0 4px; font-size:16px; line-height:1.4; }
   #msg.err { color:#ff8a80; } #msg.warn { color:#ffd180; }
+  #info { font-size:12px; color:#9aa4b2; min-height:16px; }
   button, a.btn { display:block; width:100%; padding:14px; margin-top:10px; font-size:16px; font-weight:600;
                   border-radius:10px; border:0; background:#fff; color:#1f3a5f; text-decoration:none; box-sizing:border-box; cursor:pointer; }
   a.ghost { background:transparent; color:#fff; border:1px solid #666; }
@@ -23,8 +28,12 @@
 <body>
 <header>📦 Scan barcode</header>
 <main>
-  <div id="reader"></div>
+  <div id="wrap" class="off">
+    <video id="cam" playsinline muted autoplay></video>
+    <div id="guide"></div>
+  </div>
   <p id="msg">Tekan butang di bawah untuk buka kamera.</p>
+  <div id="info"></div>
   <button id="startbtn">▶ Buka kamera</button>
   <button id="retry" hidden>Cuba buka kamera lagi</button>
   <button id="photobtn">📸 Ambil gambar barcode</button>
@@ -46,11 +55,22 @@
   const ua = navigator.userAgent;
   const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const inApp = /FBAN|FBAV|Instagram|WhatsApp|MicroMessenger|GSA\/|Snapchat|TikTok|Line\//i.test(ua);
-  let scanner = null, done = false, starting = false;
+  const FORMATS = ['qr_code', 'code_128', 'code_39', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'itf'];
+
+  let stream = null, detector = null, running = false, done = false, starting = false;
+  let frames = 0, lastText = '', lastAt = 0;
+  const video = $('cam');
+  const work = document.createElement('canvas');
 
   $('back').href = APP_URL;
 
   function say(text, cls) { $('msg').className = cls || ''; $('msg').textContent = text; }
+  function info(text) { $('info').textContent = text || ''; }
+
+  function engineName() {
+    try { return /\[native code\]/.test(Function.prototype.toString.call(window.BarcodeDetector)) ? 'asli peranti' : 'ZXing WASM'; }
+    catch (e) { return '?'; }
+  }
 
   function hint(e) {
     const n = (e && e.name) || '';
@@ -61,15 +81,23 @@
     }
     if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'Kamera belakang tak dijumpai.';
     if (n === 'NotReadableError') return 'Kamera sedang digunakan oleh app lain. Tutup app tu dan cuba lagi.';
-    if (n === 'NoMediaDevices') return e.message;
-    return 'Kamera tak dapat dibuka.';
+    if (n === 'NoMediaDevices' || n === 'NoDetector') return e.message;
+    return 'Tak dapat mula pengimbas.';
   }
 
   function fail(e) {
-    const detail = e && (e.name || e.message) ? ' [' + (e.name || '') + (e.message && e.name !== 'NoMediaDevices' ? ': ' + e.message : '') + ']' : '';
+    const own = e && (e.name === 'NoMediaDevices' || e.name === 'NoDetector');
+    const detail = e && (e.name || e.message) && !own ? ' [' + (e.name || '') + (e.message ? ': ' + e.message : '') + ']' : '';
     say(hint(e) + detail, 'err');
     $('startbtn').hidden = true;
     $('retry').hidden = false;
+  }
+
+  function stopCam() {
+    running = false;
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    video.srcObject = null;
+    $('wrap').classList.add('off');
   }
 
   function go(code) {
@@ -77,33 +105,86 @@
     code = String(code || '').trim();
     if (!code) return;
     done = true;
+    stopCam();
     if (navigator.vibrate) navigator.vibrate(120);
     say('Dijumpai: ' + code + ' …');
     const sep = APP_URL.indexOf('?') === -1 ? '?' : '&';
-    const dest = APP_URL + sep + 'code=' + encodeURIComponent(code) + '&act=' + encodeURIComponent(act);
-    const finish = () => { location.href = dest; };
-    (scanner ? scanner.stop() : Promise.resolve()).then(finish).catch(finish);
+    location.href = APP_URL + sep + 'code=' + encodeURIComponent(code) + '&act=' + encodeURIComponent(act);
   }
 
-  function makeScanner() {
-    const F = Html5QrcodeSupportedFormats;
-    return new Html5Qrcode('reader', {
-      formatsToSupport: [F.QR_CODE, F.CODE_128, F.CODE_39, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF],
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-      verbose: false
-    });
+  // UPC-A: enjin ZXing (iPhone) pulangkan 13 digit berawalan 0, Android pulangkan 12 digit. Samakan kepada 12 digit.
+  function normalize(text, format) {
+    if ((format === 'upc_a' || format === 'ean_13') && /^0\d{12}$/.test(text) && engineName() === 'ZXing WASM') {
+      return text.slice(1);
+    }
+    return text;
   }
 
-  // iPhone: elak kamera ultra-wide (tak boleh fokus dekat), pilih kamera belakang utama
-  async function pickIOSCamera() {
+  async function makeDetector() {
+    if (typeof BarcodeDetector === 'undefined') {
+      throw { name: 'NoDetector', message: 'Enjin pengimbas tak dapat dimuat (semak sambungan internet, kemudian refresh).' };
+    }
+    let fm = FORMATS;
     try {
-      const cams = await Html5Qrcode.getCameras();
-      if (!cams || !cams.length) return null;
-      const back = cams.filter(c => /back|rear|belakang/i.test(c.label));
-      const pool = back.length ? back : cams;
-      const main = pool.find(c => /^back camera$/i.test(c.label)) || pool.find(c => !/ultra|tele/i.test(c.label)) || pool[0];
-      return main ? main.id : null;
-    } catch (e) { return null; }
+      const sup = await BarcodeDetector.getSupportedFormats();
+      const ok = FORMATS.filter(f => sup.indexOf(f) !== -1);
+      if (ok.length) fm = ok;
+    } catch (e) {}
+    return new BarcodeDetector({ formats: fm });
+  }
+
+  // iPhone: elak kamera ultra-wide (tak boleh fokus dekat)
+  async function openCamera() {
+    const base = { width: { ideal: 1280 }, height: { ideal: 720 } };
+    let s = await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({ facingMode: { ideal: 'environment' } }, base) });
+    if (isIOS) {
+      try {
+        const label = (s.getVideoTracks()[0] || {}).label || '';
+        if (/ultra|tele/i.test(label)) {
+          const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput' && /back|rear/i.test(d.label));
+          const main = devs.find(d => /^back camera$/i.test(d.label)) || devs.find(d => !/ultra|tele/i.test(d.label));
+          if (main) {
+            s.getTracks().forEach(t => t.stop());
+            s = await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({ deviceId: { exact: main.deviceId } }, base) });
+          }
+        }
+      } catch (e) {}
+    }
+    try { await s.getVideoTracks()[0].applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {}
+    return s;
+  }
+
+  async function detectOnce() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return [];
+    const scale = Math.min(1, 1280 / vw);
+    work.width = Math.round(vw * scale);
+    work.height = Math.round(vh * scale);
+    work.getContext('2d').drawImage(video, 0, 0, work.width, work.height);
+    return detector.detect(work);
+  }
+
+  async function loop() {
+    while (running && !done) {
+      const t0 = Date.now();
+      try {
+        const res = await detectOnce();
+        frames++;
+        if (res && res.length) {
+          const r = res[0];
+          const text = normalize(String(r.rawValue || '').trim(), r.format);
+          const now = Date.now();
+          if (text) {
+            // sahkan: bacaan sama dua kali berturut-turut dalam 1.5 saat
+            if (text === lastText && now - lastAt < 1500) { go(text); return; }
+            lastText = text; lastAt = now;
+          }
+        }
+      } catch (e) { /* abaikan ralat satu bingkai */ }
+      info('Enjin: ' + engineName() + ' | ' + video.videoWidth + 'x' + video.videoHeight + ' | bingkai: ' + frames);
+      const wait = Math.max(0, 110 - (Date.now() - t0));
+      await new Promise(r => setTimeout(r, wait));
+    }
   }
 
   async function start() {
@@ -115,23 +196,20 @@
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw { name: 'NoMediaDevices', message: 'Browser ini tak benarkan akses kamera. Buka link ini terus dalam Safari atau Chrome, bukan dalam app lain (WhatsApp, Instagram, dsb).' };
       }
-      scanner = makeScanner();
-      const cfg = {
-        fps: 10,
-        disableFlip: true,
-        qrbox: (w, h) => ({ width: Math.floor(w * 0.9), height: Math.floor(Math.min(h * 0.6, w * 0.5)) })
-      };
-      let started = false;
-      if (isIOS) {
-        const id = await pickIOSCamera();
-        if (id) {
-          try { await scanner.start(id, cfg, go, () => {}); started = true; } catch (e1) { started = false; }
-        }
-      }
-      if (!started) await scanner.start({ facingMode: 'environment' }, cfg, go, () => {});
-      say('Hala kamera ke barcode. Pegang stabil 15 hingga 25 cm, cahaya cukup, barcode lurus mendatar.');
+      detector = await makeDetector();
+      stream = await openCamera();
+      video.srcObject = stream;
+      video.setAttribute('playsinline', '');
+      video.muted = true;
+      await video.play();
+      $('wrap').classList.remove('off');
+      say('Memuatkan enjin pengimbas…');
+      try { await detectOnce(); } catch (e) {}   // pemanas: muat turun WASM kali pertama
+      say('Hala kamera ke barcode. Pegang stabil 15 hingga 25 cm, cahaya cukup, barcode lurus mendatar dan penuhi kotak.');
+      running = true;
+      loop();
     } catch (e) {
-      scanner = null;
+      stopCam();
       fail(e);
     }
     starting = false;
@@ -147,9 +225,12 @@
     if (!f) return;
     say('Membaca barcode daripada gambar…');
     try {
-      if (scanner) { try { await scanner.stop(); } catch (x) {} scanner = null; }
-      const text = await makeScanner().scanFile(f, false);
-      go(text);
+      stopCam();
+      if (!detector) detector = await makeDetector();
+      const bmp = await createImageBitmap(f);
+      const res = await detector.detect(bmp);
+      if (res && res.length) go(normalize(String(res[0].rawValue || '').trim(), res[0].format));
+      else say('Barcode tak dapat dibaca. Dekatkan, pastikan terang dan lurus, kemudian cuba lagi.', 'err');
     } catch (err) {
       say('Barcode tak dapat dibaca. Dekatkan, pastikan terang dan lurus, kemudian cuba lagi.', 'err');
     }
